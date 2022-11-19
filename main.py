@@ -5,7 +5,8 @@ import torch.nn as nn
 import pandas as pd
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
-from resnet import Bottleneck, ResNet, ResNet50
+from lstm import lstm
+from torch.autograd import Variable 
 
 def ImportData(file):
     """Import data and group the lidar portion into 4. 
@@ -51,69 +52,28 @@ def ImportData(file):
     l_3 = [np.average(l) for l in lidar_3]
     l_4 = [np.average(l) for l in lidar_4]
     # Regularize by dividing the max value of each set of lidar data
-    l_1 = l_1 / np.amax(l_1)
-    l_2 = l_2 / np.amax(l_2)
-    l_3 = l_3 / np.amax(l_3)
-    l_4 = l_4 / np.amax(l_4)
+    l_1_reg = l_1 / np.amax(l_1)
+    l_2_reg = l_2 / np.amax(l_2)
+    l_3_reg = l_3 / np.amax(l_3)
+    l_4_reg = l_4 / np.amax(l_4)
 
     feature = []
-    for i in range(len(data)): # Link all data in an array and reshape to match the number of features padded data set with a 1
-        feature = np.append(feature, (1, l_1[i], l_2[i], l_3[i], l_4[i], pos_delta[0][i], pos_delta[1][i], ori_delta[0][i], ori_delta[1][i]))
-    feature = np.reshape(feature, (len(label), 9))
+    # for i in range(len(data)): # Link all data in an array and reshape to match the number of features padded data set with a 1
+    #     feature = np.append(feature, (1, l_1_reg[i], l_2_reg[i], l_3_reg[i], l_4_reg[i], pos_delta[0][i], pos_delta[1][i], ori_delta[0][i], ori_delta[1][i]))
+    # feature = np.reshape(feature, (len(label), 9))
+    for i in range(len(data)):
+        if i != 0:
+            f = np.array([1, l_1_reg[i], l_2_reg[i], l_3_reg[i], l_4_reg[i], pos_delta[0][i], pos_delta[1][i], ori_delta[0][i], ori_delta[1][i]])
+            feature = np.vstack((feature, f))
+        else:
+            feature = np.array((1, l_1_reg[i], l_2_reg[i], l_3_reg[i], l_4_reg[i], pos_delta[0][i], pos_delta[1][i], ori_delta[0][i], ori_delta[1][i]))
+    # # plot robot position
+    # plt.plot(robot_pos[0], robot_pos[1])
+    # plt.show()
 
     return feature, label
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--model', type=str, default='ResNet', help='model name: test, lstm')
-    args = parser.parse_args()
-
-    train_feature, train_label = ImportData('corridor_CSV/July22_29.csv')
-    test_feature, test_label = ImportData('July22_11.csv')
-
-    # format to tensor
-    train_feature = torch.from_numpy(train_feature).float()
-    train_label = torch.from_numpy(train_label).float()
-    test_feature = torch.from_numpy(test_feature).float()
-    test_label = torch.from_numpy(test_label).float()
-
-    # Define the model
-    if args.model == 'test':
-        model = nn.Sequential(
-            nn.Linear(9, 64),
-            nn.ReLU(),  # activation
-            nn.Linear(64, 64),
-            nn.ReLU(),  # activation
-            nn.Linear(64, 2),
-        )
-    elif args.model == 'lstm':
-        model = nn.LSTM(9, 64, 2, batch_first=True)
-
-
-
-    y_loss = {}  # loss history
-    y_loss['train'] = []
-    y_loss['val'] = []
-    y_acc = {}
-    y_acc['train'] = []
-    y_acc['val'] = []
-
-    x_epoch = []
-
-    EPOCH = 1000
-    if torch.cuda.is_available():
-        device = torch.device("cuda:0")  # you can continue going on here, like cuda:1 cuda:2....etc. 
-        print("Running on the GPU")
-    else:
-        device = torch.device("cpu")
-        print("Running on the CPU")
-    
-    model.to(device)
-
-    # Define the optimizer
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-    # Define the loss function
-    loss_function = nn.MSELoss()
+def test_training(EPOCH, model, train_feature, train_label, y_loss, y_acc):
     # Train the model
     for t in range(EPOCH):
         # Forward pass: compute predicted y by passing x to the model.
@@ -140,6 +100,132 @@ if __name__ == '__main__':
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+
+def lstm_training(EPOCH, model, optimizer, loss_function, train_feature, train_label, y_loss, y_acc):
+    # Train the model
+    for t in range(EPOCH):
+        # Forward pass: compute predicted y by passing x to the model.
+        outputs = model.forward(train_feature)
+        optimizer.zero_grad()
+
+        loss = loss_function(outputs, train_label)
+        loss.backward()
+        optimizer.step()
+
+        if t % 50 == 0:
+            y_loss['train'].append(loss.item())
+            matches = [torch.argmax(i) == torch.argmax(j) for i, j in zip(outputs, train_label)]
+            acc = matches.count(True) / len(matches)
+            y_acc['train'].append(acc)
+            x_epoch.append(t)
+            print('Epoch: ', t, 'Loss: ', round(loss.item(), 4), 'Accuracy: ', round(acc, 2)*100)
+
+def cnn_training(EPOCH, model, train_feature, train_label, y_loss, y_acc):
+    # reshape input to [1, 9, 23960]
+    train_feature = train_feature.reshape(1, 9, 23960)
+    # Train the model
+    for t in range(EPOCH):
+        # Forward pass: compute predicted y by passing x to the model.
+        y_pred = model(train_feature)
+
+        loss = loss_function(y_pred, train_label)
+        # Compute loss and accuracy
+        if t % 50 == 0:
+            y_loss['train'].append(loss.item())
+            # y_err['train'].append(torch.mean(torch.abs(y_pred - train_label)))
+            # calculate accuracy
+            matches = [torch.argmax(i) == torch.argmax(j) for i, j in zip(y_pred, train_label)]
+            acc = matches.count(True) / len(matches)
+            y_acc['train'].append(acc)
+            x_epoch.append(t)
+            print('Epoch: ', t, 'Loss: ', round(loss.item(), 4), 'Accuracy: ', round(acc, 2)*100)
+
+
+        # Zero gradients, perform a backward pass, and update the weights.
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+            
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--model', type=str, default='lstm', help='model name: test, lstm, unet')
+    args = parser.parse_args()
+
+    if torch.cuda.is_available():
+        device = torch.device("cuda:0")  # you can continue going on here, like cuda:1 cuda:2....etc. 
+        print("Running on the GPU")
+    else:
+        device = torch.device("cpu")
+        print("Running on the CPU")
+
+    train_feature, train_label = ImportData('corridor_CSV/July22_29.csv')
+    test_feature, test_label = ImportData('July22_11.csv')
+
+    # format to tensor
+    # train_feature = torch.from_numpy(train_feature).float()
+    # train_label = torch.from_numpy(train_label).float()
+    # test_feature = torch.from_numpy(test_feature).float()
+    # test_label = torch.from_numpy(test_label).float()
+    train_feature = torch.Tensor(train_feature)
+    train_label = torch.Tensor(train_label)
+    test_feature = torch.Tensor(test_feature)
+    test_label = torch.Tensor(test_label)
+
+    y_loss = {}  # loss history
+    y_loss['train'] = []
+    y_loss['val'] = []
+    y_acc = {}
+    y_acc['train'] = []
+    y_acc['val'] = []
+
+    x_epoch = []
+
+    EPOCH = 1000
+    
+    train_feature = train_feature.to(device)
+    train_label = train_label.to(device)
+    test_feature = test_feature.to(device)
+    test_label = test_label.to(device)
+    
+    # Define the loss function
+    loss_function = nn.MSELoss()
+
+    # Define the model
+    if args.model == 'test':
+        model = nn.Sequential(
+            nn.Linear(9, 64),
+            nn.ReLU(),  # activation
+            nn.Linear(64, 64),
+            nn.ReLU(),  # activation
+            nn.Linear(64, 2),
+        )
+        model.to(device)
+        # Define the optimizer
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+        
+        test_training(EPOCH, model, train_feature, train_label, y_loss, y_acc)
+
+    elif args.model == 'lstm':
+        train_feature = torch.reshape(train_feature, (train_feature.shape[0], 1, train_feature.shape[1]))
+        test_feature = torch.reshape(test_feature, (test_feature.shape[0], 1, test_feature.shape[1]))
+        train_feature = Variable(train_feature)
+        train_label = Variable(train_label)
+
+        num_classes = 2 # number of output classes
+        input_size = 9 # number of input Features
+        hidden_size = 64 # number of hidden nodes
+        num_layers = 1 # number of LSTM layers
+        model = lstm(num_classes, input_size, hidden_size, num_layers, train_feature.shape[1], device)
+        model.to(device)
+        # Define the optimizer
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+        lstm_training(EPOCH, model, optimizer, loss_function, train_feature, train_label, y_loss, y_acc)
+
+    
+        
 
     # # Test the model
     # with torch.no_grad():
